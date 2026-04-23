@@ -9,18 +9,39 @@ CHAT_ID = "1674106249"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 def send_alert(msg):
-    url = f"{BASE_URL}/sendMessage"
-    requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": msg
-    })
+    try:
+        url = f"{BASE_URL}/sendMessage"
+        requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": msg
+        }, timeout=5)
+    except Exception as e:
+        print("Telegram error:", e)
 
-# ================== FETCH NIFTY (YAHOO) ==================
+
+# ================== FETCH NIFTY (YAHOO SAFE) ==================
 def fetch_price():
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
-        res = requests.get(url, timeout=5)
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        }
+
+        res = requests.get(url, headers=headers, timeout=5)
+
+        # ✅ check empty response (fix your error)
+        if not res.text:
+            print("Empty response from Yahoo")
+            return None
+
         data = res.json()
+
+        # ✅ safe parsing
+        if "chart" not in data or data["chart"]["result"] is None:
+            print("Invalid Yahoo response:", data)
+            return None
 
         price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
         return float(price)
@@ -29,16 +50,17 @@ def fetch_price():
         print("Fetch error:", e)
         return None
 
+
 # ================== SIGNAL LOGIC ==================
 prices = []
-last_signal = None  # prevent duplicate signals
+last_signal = None
 
 def check_signal(price):
     global last_signal
 
     prices.append(price)
 
-    # keep only last 3 prices
+    # keep only last 3
     if len(prices) > 3:
         prices.pop(0)
 
@@ -47,7 +69,7 @@ def check_signal(price):
 
     p1, p2, p3 = prices
 
-    # 📈 CALL (Bullish momentum)
+    # 📈 CALL
     if p1 < p2 < p3 and last_signal != "CALL":
         strike = round(p3 / 50) * 50
 
@@ -60,7 +82,7 @@ Target: {p3 + 40}"""
         send_alert(msg)
         last_signal = "CALL"
 
-    # 📉 PUT (Bearish momentum)
+    # 📉 PUT
     elif p1 > p2 > p3 and last_signal != "PUT":
         strike = round(p3 / 50) * 50
 
@@ -84,27 +106,28 @@ while True:
         price = fetch_price()
 
         if price is None:
-            time.sleep(10)
+            time.sleep(15)
             continue
 
-        # avoid duplicate same price spam
+        # avoid duplicate spam
         if price == last_price:
-            time.sleep(10)
+            time.sleep(15)
             continue
 
         last_price = price
 
         print("NIFTY:", price)
 
-        # send live update
         now = datetime.now().strftime("%H:%M:%S")
-        send_alert(f"📊 NIFTY LIVE\nLTP: {price}\nTime: {now}")
 
-        # check signal
+        send_alert(f"""📊 NIFTY LIVE
+LTP: {price}
+Time: {now}""")
+
         check_signal(price)
 
-        time.sleep(15)
+        time.sleep(20)  # ✅ safer delay for Yahoo
 
     except Exception as e:
-        print("Error:", e)
+        print("Main loop error:", e)
         time.sleep(10)
