@@ -8,56 +8,62 @@ CHAT_ID = "1674106249"
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ================== SEND ALERT ==================
+# ================== TELEGRAM ==================
 def send_alert(msg):
-    url = f"{BASE_URL}/sendMessage"
     try:
-        res = requests.post(url, json={
+        url = f"{BASE_URL}/sendMessage"
+        response = requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": msg
         })
-        print("Telegram:", res.text)
+        print("Telegram:", response.json())
     except Exception as e:
-        print("Send error:", e)
+        print("Telegram Error:", e)
 
-# ================== FETCH DATA (PROXY FIX) ==================
+
+# ================== FETCH DATA ==================
 def fetch_data():
-    url = "https://api.allorigins.win/raw?url=https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        return response.json()
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
+
+        return {"price": price}
+
     except Exception as e:
         print("Fetch error:", e)
         return {}
+
 
 # ================== LOGIC ==================
 def check_signal():
     data = fetch_data()
 
-    if "records" not in data:
-        print("❌ Invalid NSE response:", data)
+    if "price" not in data:
+        print("❌ Invalid response:", data)
         return
 
-    underlying = data["records"]["underlyingValue"]
+    price = data["price"]
 
-    msg = f"📊 NIFTY Update\nLTP: {underlying}\nTime: {datetime.now().strftime('%H:%M:%S')}"
+    msg = f"""📊 NIFTY LIVE
+LTP: {price}
+Time: {datetime.now().strftime('%H:%M:%S')}
+"""
     send_alert(msg)
 
-# ================== MAIN ==================
+
+# ================== MAIN LOOP ==================
 if __name__ == "__main__":
     send_alert("🔥 BOT STARTED SUCCESSFULLY")
 
     while True:
         try:
             check_signal()
-            time.sleep(60)
+            time.sleep(60)  # every 1 min
 
         except Exception as e:
-            print("Loop error:", e)
-            send_alert(f"⚠️ ERROR: {e}")
+            print("Error:", e)
             time.sleep(10)
