@@ -1,133 +1,74 @@
 import requests
 import time
 from datetime import datetime
-import os
 
-# ================= ENV VARIABLES =================
-BOT_TOKEN = os.getenv("8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4")
-CHAT_ID = os.getenv("1674106249")
+# ================== CONFIG ==================
+BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
+CHAT_ID = "1674106249"
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ================= SEND ALERT =================
+# ================== SEND ALERT ==================
 def send_alert(msg):
     url = f"{BASE_URL}/sendMessage"
-    requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": msg
-    })
-
-# ================= FETCH DATA =================
-def fetch_data():
-    url = "https://corsproxy.io/?https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    return requests.get(url, headers=headers).json()
-
-# ================= ANALYSIS =================
-def analyze():
-    data = fetch_data()
-    records = data["records"]["data"]
-    spot = data["records"]["underlyingValue"]
-
-    atm = round(spot / 50) * 50
-
-    call_chg = 0
-    put_chg = 0
-
-    for r in records:
-        if "CE" in r and "PE" in r:
-            strike = r["strikePrice"]
-
-            # Focus ATM ± 2 strikes
-            if abs(strike - atm) <= 100:
-                call_chg += r["CE"]["changeinOpenInterest"]
-                put_chg += r["PE"]["changeinOpenInterest"]
-
-    return spot, call_chg, put_chg, atm
-
-# ================= TREND =================
-def get_trend(call_chg, put_chg):
-    if call_chg > 5000 and put_chg < -2000:
-        return "BEARISH"
-    elif put_chg > 5000 and call_chg < -2000:
-        return "BULLISH"
-    else:
-        return "SIDEWAYS"
-
-# ================= MAIN LOOP =================
-last_price = None
-last_signal = None
-
-while True:
     try:
-        now = datetime.now()
-        current_time = now.strftime("%H:%M")
+        res = requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": msg
+        })
+        print("Telegram:", res.text)
+    except Exception as e:
+        print("Send error:", e)
 
-        # ⛔ TIME FILTER
-        if current_time < "09:20" or current_time > "15:10":
-            time.sleep(30)
-            continue
+# ================== FETCH DATA (FIXED NSE) ==================
+def fetch_data():
+    url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
 
-        spot, call_chg, put_chg, atm = analyze()
-        trend = get_trend(call_chg, put_chg)
+    session = requests.Session()
 
-        signal = None
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br"
+    }
 
-        # ⛔ SIDEWAYS FILTER
-        if trend == "SIDEWAYS":
-            print("No trade zone")
-            time.sleep(20)
-            continue
+    try:
+        # Step 1: get cookies (IMPORTANT)
+        session.get("https://www.nseindia.com", headers=headers)
 
-        if last_price:
-            move = spot - last_price
+        # Step 2: fetch actual data
+        response = session.get(url, headers=headers)
 
-            # 🔴 BREAKDOWN
-            if trend == "BEARISH" and move < -15:
-                signal = f"""🔴 BREAKDOWN SELL
-
-Spot: {spot}
-Trend: Bearish
-
-👉 BUY {atm} PE
-"""
-
-            # 🟢 BREAKOUT
-            elif trend == "BULLISH" and move > 15:
-                signal = f"""🟢 BREAKOUT BUY
-
-Spot: {spot}
-Trend: Bullish
-
-👉 BUY {atm} CE
-"""
-
-            # ⚡ PULLBACK
-            elif abs(move) < 5:
-                if trend == "BULLISH":
-                    signal = f"""🟢 PULLBACK BUY
-
-Spot: {spot}
-
-👉 BUY {atm} CE
-"""
-                elif trend == "BEARISH":
-                    signal = f"""🔴 PULLBACK SELL
-
-Spot: {spot}
-
-👉 BUY {atm} PE
-"""
-
-        # 🚀 SEND ALERT
-        if signal and signal != last_signal:
-            send_alert(signal)
-            last_signal = signal
-
-        last_price = spot
-
-        time.sleep(20)
+        return response.json()
 
     except Exception as e:
-        print("Error:", e)
-        time.sleep(10)
+        print("Fetch error:", e)
+        return {}
+
+# ================== LOGIC ==================
+def check_signal():
+    data = fetch_data()
+
+    # SAFE CHECK (prevents crash)
+    if "records" not in data:
+        print("❌ Invalid NSE response:", data)
+        return
+
+    underlying = data["records"]["underlyingValue"]
+
+    msg = f"📊 NIFTY Update\nLTP: {underlying}\nTime: {datetime.now().strftime('%H:%M:%S')}"
+    send_alert(msg)
+
+# ================== MAIN ==================
+if __name__ == "__main__":
+    send_alert("🔥 BOT STARTED SUCCESSFULLY")
+
+    while True:
+        try:
+            check_signal()
+            time.sleep(60)  # every 1 minute
+
+        except Exception as e:
+            print("Loop error:", e)
+            send_alert(f"⚠️ ERROR: {e}")
+            time.sleep(10)
