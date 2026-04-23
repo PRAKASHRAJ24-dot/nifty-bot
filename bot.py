@@ -2,16 +2,18 @@ import requests
 import time
 from datetime import datetime
 
-# ================== CONFIG ==================
+# ================= CONFIG =================
 BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
 CHAT_ID = "1674106249"
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 last_signal = None
+last_price = None
+prices = []
 
 
-# ================== TELEGRAM ==================
+# ================= TELEGRAM =================
 def send_alert(msg):
     try:
         requests.post(f"{BASE_URL}/sendMessage", json={
@@ -22,194 +24,110 @@ def send_alert(msg):
         print("Telegram error:", e)
 
 
-# ================== FETCH CANDLES ==================
-def fetch_candles():
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=5m&range=1d"
+# ================= FETCH PRICE =================
+def fetch_price():
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()["chart"]["result"][0]
 
-        close = data["indicators"]["quote"][0]["close"]
-        high = data["indicators"]["quote"][0]["high"]
-        low = data["indicators"]["quote"][0]["low"]
+        if res.status_code != 200:
+            return None
 
-        # clean None
-        candles = []
-        for i in range(len(close)):
-            if close[i] and high[i] and low[i]:
-                candles.append({
-                    "close": close[i],
-                    "high": high[i],
-                    "low": low[i]
-                })
+        data = res.json()
 
-        return candles[-10:]  # last 10 candles
+        result = data.get("chart", {}).get("result")
+        if not result:
+            return None
+
+        return result[0]["meta"]["regularMarketPrice"]
 
     except Exception as e:
         print("Fetch error:", e)
-        return []
+        return None
 
 
-# ================== STRIKE ==================
+# ================= STRIKE =================
 def get_atm(price):
     return round(price / 50) * 50
 
 
-# ================== VWAP STYLE BIAS ==================
-def get_bias(candles):
-    closes = [c["close"] for c in candles]
-    avg = sum(closes) / len(closes)
+# ================= SIGNAL LOGIC =================
+def check_signal(price):
+    global prices, last_signal
 
-    current = closes[-1]
+    prices.append(price)
 
-    if current > avg:
-        return "BULLISH"
-    else:
-        return "BEARISH"
+    # keep last 3 prices
+    if len(prices) > 3:
+        prices.pop(0)
 
-
-# ================== SIGNAL ENGINE ==================
-last_candle_time = None
-
-def generate_signal():
-    global last_signal, last_candle_time
-
-    candles = fetch_candles()
-
-    if len(candles) < 6:
+    if len(prices) < 3:
         return
 
-    last = candles[-1]
+    c1, c2, c3 = prices
+    atm = get_atm(price)
 
-    # 🔥 skip if same candle
-    if last_candle_time == last["close"]:
-        return
-
-    last_candle_time = last["close"]
-
-    prev = candles[-2]
-    prev2 = candles[-3]
-
-    highs = [c["high"] for c in candles[:-1]]
-    lows = [c["low"] for c in candles[:-1]]
-
-    current_price = last["close"]
-    atm = get_atm(current_price)
-    bias = get_bias(candles)
-
-    # ================== BREAKOUT ==================
-    if last["high"] > max(highs) and bias == "BULLISH" and last_signal != "CALL":
+    # 📈 CALL (up momentum)
+    if c1 < c2 < c3 and last_signal != "CALL":
         last_signal = "CALL"
 
-        send_alert(f"""🚀 CALL BREAKOUT
-Index: {current_price}
+        send_alert(f"""📈 CALL SIGNAL
+
+Index: {price}
 Strike: {atm} CE
-SL: {current_price - 40}
-Target: {current_price + 100}
+
+Entry: {price}
+SL: {price - 40}
+Target: {price + 80}
+
+Time: {datetime.now().strftime('%H:%M:%S')}
 """)
 
-    elif last["low"] < min(lows) and bias == "BEARISH" and last_signal != "PUT":
+    # 📉 PUT (down momentum)
+    elif c1 > c2 > c3 and last_signal != "PUT":
         last_signal = "PUT"
 
-        send_alert(f"""🔻 PUT BREAKDOWN
-Index: {current_price}
+        send_alert(f"""📉 PUT SIGNAL
+
+Index: {price}
 Strike: {atm} PE
-SL: {current_price + 40}
-Target: {current_price - 100}
+
+Entry: {price}
+SL: {price + 40}
+Target: {price - 80}
+
+Time: {datetime.now().strftime('%H:%M:%S')}
 """)
 
-    # ================== BREAKOUT ==================
 
-    # 📈 Bullish breakout
-    if last["high"] > max(highs) and bias == "BULLISH" and last_signal != "CALL":
-        last_signal = "CALL"
-
-        msg = f"""🚀 CALL BREAKOUT
-
-Index: {current_price}
-Strike: {atm} CE
-
-Bias: {bias}
-
-Entry: {round(current_price,1)}
-SL: {round(current_price - 40,1)}
-Target: {round(current_price + 100,1)}
-
-Reason: High breakout + trend support
-Time: {datetime.now().strftime('%H:%M:%S')}
-"""
-        send_alert(msg)
-
-    # 📉 Bearish breakdown
-    elif last["low"] < min(lows) and bias == "BEARISH" and last_signal != "PUT":
-        last_signal = "PUT"
-
-        msg = f"""🔻 PUT BREAKDOWN
-
-Index: {current_price}
-Strike: {atm} PE
-
-Bias: {bias}
-
-Entry: {round(current_price,1)}
-SL: {round(current_price + 40,1)}
-Target: {round(current_price - 100,1)}
-
-Reason: Low breakdown + trend support
-Time: {datetime.now().strftime('%H:%M:%S')}
-"""
-        send_alert(msg)
-
-    # ================== MOMENTUM ==================
-
-    # 📈 Uptrend continuation
-    elif prev2["close"] < prev["close"] < last["close"] and bias == "BULLISH" and last_signal != "CALL":
-        last_signal = "CALL"
-
-        msg = f"""📈 CALL MOMENTUM
-
-Index: {current_price}
-Strike: {atm} CE
-
-Entry: {round(current_price,1)}
-SL: {round(current_price - 30,1)}
-Target: {round(current_price + 80,1)}
-
-Reason: 3 candle bullish momentum
-Time: {datetime.now().strftime('%H:%M:%S')}
-"""
-        send_alert(msg)
-
-    # 📉 Downtrend continuation
-    elif prev2["close"] > prev["close"] > last["close"] and bias == "BEARISH" and last_signal != "PUT":
-        last_signal = "PUT"
-
-        msg = f"""📉 PUT MOMENTUM
-
-Index: {current_price}
-Strike: {atm} PE
-
-Entry: {round(current_price,1)}
-SL: {round(current_price + 30,1)}
-Target: {round(current_price - 80,1)}
-
-Reason: 3 candle bearish momentum
-Time: {datetime.now().strftime('%H:%M:%S')}
-"""
-        send_alert(msg)
-
-
-# ================== MAIN ==================
+# ================= MAIN =================
 if __name__ == "__main__":
-    send_alert("🔥 ULTIMATE BOT STARTED")
+    send_alert("🔥 YAHOO BOT STARTED")
 
     while True:
         try:
-            generate_signal()
-            time.sleep(60)
+            price = fetch_price()
+
+            if price is None:
+                time.sleep(10)
+                continue
+
+            # 🔥 skip duplicate price
+            global last_price
+            if price == last_price:
+                time.sleep(10)
+                continue
+
+            last_price = price
+
+            print("New price:", price)
+
+            check_signal(price)
+
+            time.sleep(15)
 
         except Exception as e:
-            print("Loop error:", e)
+            print("Error:", e)
             time.sleep(10)
