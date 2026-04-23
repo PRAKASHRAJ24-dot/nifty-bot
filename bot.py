@@ -12,11 +12,11 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 def send_alert(msg):
     try:
         url = f"{BASE_URL}/sendMessage"
-        response = requests.post(url, json={
+        res = requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": msg
         })
-        print("Telegram:", response.json())
+        print("Telegram:", res.text)
     except Exception as e:
         print("Telegram Error:", e)
 
@@ -25,28 +25,41 @@ def send_alert(msg):
 def fetch_data():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
 
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
     try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
+        res = requests.get(url, headers=headers, timeout=10)
 
-        price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
+        if res.status_code != 200:
+            print("Bad status:", res.status_code)
+            return None
 
-        return {"price": price}
+        data = res.json()
+
+        result = data.get("chart", {}).get("result")
+
+        if not result:
+            print("No result in response")
+            return None
+
+        price = result[0]["meta"]["regularMarketPrice"]
+
+        return price
 
     except Exception as e:
         print("Fetch error:", e)
-        return {}
+        return None
 
 
 # ================== LOGIC ==================
 def check_signal():
-    data = fetch_data()
+    price = fetch_data()
 
-    if "price" not in data:
-        print("❌ Invalid response:", data)
+    if price is None:
+        print("⚠️ Skipping this cycle")
         return
-
-    price = data["price"]
 
     msg = f"""📊 NIFTY LIVE
 LTP: {price}
@@ -55,15 +68,15 @@ Time: {datetime.now().strftime('%H:%M:%S')}
     send_alert(msg)
 
 
-# ================== MAIN LOOP ==================
+# ================== MAIN ==================
 if __name__ == "__main__":
     send_alert("🔥 BOT STARTED SUCCESSFULLY")
 
     while True:
         try:
             check_signal()
-            time.sleep(60)  # every 1 min
+            time.sleep(60)
 
         except Exception as e:
-            print("Error:", e)
+            print("Loop error:", e)
             time.sleep(10)
