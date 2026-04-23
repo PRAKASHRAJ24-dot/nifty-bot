@@ -2,132 +2,109 @@ import requests
 import time
 from datetime import datetime
 
-# ================= CONFIG =================
+# ================== TELEGRAM CONFIG ==================
 BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
 CHAT_ID = "1674106249"
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-last_signal = None
-last_price = None
-prices = []
-
-
-# ================= TELEGRAM =================
 def send_alert(msg):
-    try:
-        requests.post(f"{BASE_URL}/sendMessage", json={
-            "chat_id": CHAT_ID,
-            "text": msg
-        })
-    except Exception as e:
-        print("Telegram error:", e)
+    url = f"{BASE_URL}/sendMessage"
+    requests.post(url, json={
+        "chat_id": CHAT_ID,
+        "text": msg
+    })
 
-
-# ================= FETCH PRICE =================
+# ================== FETCH NIFTY (YAHOO) ==================
 def fetch_price():
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-
-        if res.status_code != 200:
-            return None
-
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
+        res = requests.get(url, timeout=5)
         data = res.json()
 
-        result = data.get("chart", {}).get("result")
-        if not result:
-            return None
-
-        return result[0]["meta"]["regularMarketPrice"]
+        price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
+        return float(price)
 
     except Exception as e:
         print("Fetch error:", e)
         return None
 
+# ================== SIGNAL LOGIC ==================
+prices = []
+last_signal = None  # prevent duplicate signals
 
-# ================= STRIKE =================
-def get_atm(price):
-    return round(price / 50) * 50
-
-
-# ================= SIGNAL LOGIC =================
 def check_signal(price):
-    global prices, last_signal
+    global last_signal
 
     prices.append(price)
 
-    # keep last 3 prices
+    # keep only last 3 prices
     if len(prices) > 3:
         prices.pop(0)
 
     if len(prices) < 3:
         return
 
-    c1, c2, c3 = prices
-    atm = get_atm(price)
+    p1, p2, p3 = prices
 
-    # 📈 CALL (up momentum)
-    if c1 < c2 < c3 and last_signal != "CALL":
+    # 📈 CALL (Bullish momentum)
+    if p1 < p2 < p3 and last_signal != "CALL":
+        strike = round(p3 / 50) * 50
+
+        msg = f"""📈 CALL SIGNAL
+Strike: {strike} CE
+Entry: {p3}
+SL: {p3 - 20}
+Target: {p3 + 40}"""
+
+        send_alert(msg)
         last_signal = "CALL"
 
-        send_alert(f"""📈 CALL SIGNAL
+    # 📉 PUT (Bearish momentum)
+    elif p1 > p2 > p3 and last_signal != "PUT":
+        strike = round(p3 / 50) * 50
 
-Index: {price}
-Strike: {atm} CE
+        msg = f"""📉 PUT SIGNAL
+Strike: {strike} PE
+Entry: {p3}
+SL: {p3 + 20}
+Target: {p3 - 40}"""
 
-Entry: {price}
-SL: {price - 40}
-Target: {price + 80}
-
-Time: {datetime.now().strftime('%H:%M:%S')}
-""")
-
-    # 📉 PUT (down momentum)
-    elif c1 > c2 > c3 and last_signal != "PUT":
+        send_alert(msg)
         last_signal = "PUT"
 
-        send_alert(f"""📉 PUT SIGNAL
 
-Index: {price}
-Strike: {atm} PE
+# ================== MAIN LOOP ==================
+last_price = None
 
-Entry: {price}
-SL: {price + 40}
-Target: {price - 80}
+send_alert("🔥 ULTIMATE BOT STARTED")
 
-Time: {datetime.now().strftime('%H:%M:%S')}
-""")
+while True:
+    try:
+        price = fetch_price()
 
-
-# ================= MAIN =================
-if __name__ == "__main__":
-    send_alert("🔥 YAHOO BOT STARTED")
-
-    while True:
-        try:
-            price = fetch_price()
-
-            if price is None:
-                time.sleep(10)
-                continue
-
-            # 🔥 skip duplicate price
-            global last_price
-            if price == last_price:
-                time.sleep(10)
-                continue
-
-            last_price = price
-
-            print("New price:", price)
-
-            check_signal(price)
-
-            time.sleep(15)
-
-        except Exception as e:
-            print("Error:", e)
+        if price is None:
             time.sleep(10)
+            continue
+
+        # avoid duplicate same price spam
+        if price == last_price:
+            time.sleep(10)
+            continue
+
+        last_price = price
+
+        print("NIFTY:", price)
+
+        # send live update
+        now = datetime.now().strftime("%H:%M:%S")
+        send_alert(f"📊 NIFTY LIVE\nLTP: {price}\nTime: {now}")
+
+        # check signal
+        check_signal(price)
+
+        time.sleep(15)
+
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(10)
