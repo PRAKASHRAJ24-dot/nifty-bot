@@ -71,8 +71,10 @@ def get_bias(candles):
 
 
 # ================== SIGNAL ENGINE ==================
+last_candle_time = None
+
 def generate_signal():
-    global last_signal
+    global last_signal, last_candle_time
 
     candles = fetch_candles()
 
@@ -80,6 +82,13 @@ def generate_signal():
         return
 
     last = candles[-1]
+
+    # 🔥 skip if same candle
+    if last_candle_time == last["close"]:
+        return
+
+    last_candle_time = last["close"]
+
     prev = candles[-2]
     prev2 = candles[-3]
 
@@ -88,8 +97,28 @@ def generate_signal():
 
     current_price = last["close"]
     atm = get_atm(current_price)
-
     bias = get_bias(candles)
+
+    # ================== BREAKOUT ==================
+    if last["high"] > max(highs) and bias == "BULLISH" and last_signal != "CALL":
+        last_signal = "CALL"
+
+        send_alert(f"""🚀 CALL BREAKOUT
+Index: {current_price}
+Strike: {atm} CE
+SL: {current_price - 40}
+Target: {current_price + 100}
+""")
+
+    elif last["low"] < min(lows) and bias == "BEARISH" and last_signal != "PUT":
+        last_signal = "PUT"
+
+        send_alert(f"""🔻 PUT BREAKDOWN
+Index: {current_price}
+Strike: {atm} PE
+SL: {current_price + 40}
+Target: {current_price - 100}
+""")
 
     # ================== BREAKOUT ==================
 
