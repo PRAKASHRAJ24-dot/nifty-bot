@@ -20,27 +20,17 @@ def send_alert(msg):
     except Exception as e:
         print("Send error:", e)
 
-# ================== FETCH DATA (FIXED NSE) ==================
+# ================== FETCH DATA (PROXY FIX) ==================
 def fetch_data():
-    url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-
-    session = requests.Session()
+    url = "https://api.allorigins.win/raw?url=https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
 
     headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br"
+        "User-Agent": "Mozilla/5.0"
     }
 
     try:
-        # Step 1: get cookies (IMPORTANT)
-        session.get("https://www.nseindia.com", headers=headers)
-
-        # Step 2: fetch actual data
-        response = session.get(url, headers=headers)
-
+        response = requests.get(url, headers=headers, timeout=10)
         return response.json()
-
     except Exception as e:
         print("Fetch error:", e)
         return {}
@@ -49,7 +39,6 @@ def fetch_data():
 def check_signal():
     data = fetch_data()
 
-    # SAFE CHECK (prevents crash)
     if "records" not in data:
         print("❌ Invalid NSE response:", data)
         return
@@ -66,7 +55,7 @@ if __name__ == "__main__":
     while True:
         try:
             check_signal()
-            time.sleep(60)  # every 1 minute
+            time.sleep(60)
 
         except Exception as e:
             print("Loop error:", e)
