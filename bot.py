@@ -10,14 +10,16 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 price_history = []
 MAX_HISTORY = 30
 
-last_signal = None
 last_signal_time = 0
 COOLDOWN = 300
 
 swing_high = None
 swing_low = None
+trend = None
 
-trend = None  # UP / DOWN
+# ================= LEVELS =================
+SUPPORT = 24060
+RESISTANCE = 24150
 
 # ================= TELEGRAM =================
 def send_alert(msg):
@@ -35,10 +37,10 @@ def get_price():
     except:
         return None
 
-# ================= MOCK OI =================
+# ================= OI MOCK =================
 def get_oi_data():
     return {
-        "price_change": -10,
+        "price_change": 10,
         "oi_change": 5000
     }
 
@@ -56,6 +58,12 @@ def detect_oi_type(data):
         return "LONG_UNWINDING"
     return None
 
+# ================= PRICE UPDATE =================
+def update_price(price):
+    price_history.append(price)
+    if len(price_history) > MAX_HISTORY:
+        price_history.pop(0)
+
 # ================= SWING DETECTION =================
 def detect_swings():
     global swing_high, swing_low
@@ -63,7 +71,7 @@ def detect_swings():
     if len(price_history) < 5:
         return
 
-    for i in range(2, len(price_history) - 2):
+    for i in range(2, len(price_history)-2):
         p = price_history[i]
 
         if p > price_history[i-1] and p > price_history[i+1]:
@@ -72,86 +80,87 @@ def detect_swings():
         if p < price_history[i-1] and p < price_history[i+1]:
             swing_low = p
 
-# ================= UPDATE =================
-def update_price(price):
-    price_history.append(price)
+# ================= STRUCTURE =================
+def detect_structure(price):
+    global trend
 
-    if len(price_history) > MAX_HISTORY:
-        price_history.pop(0)
+    if swing_high is None or swing_low is None:
+        return None
 
-    detect_swings()
+    # CHOCH
+    if trend == "DOWN" and price > swing_high:
+        trend = "UP"
+        return "CHOCH_BULLISH"
+
+    elif trend == "UP" and price < swing_low:
+        trend = "DOWN"
+        return "CHOCH_BEARISH"
+
+    # BOS
+    if price > swing_high:
+        trend = "UP"
+        return "BOS_BULLISH"
+
+    elif price < swing_low:
+        trend = "DOWN"
+        return "BOS_BEARISH"
+
+    return None
 
 # ================= SIGNAL =================
 def check_signal(price):
-    global last_signal, last_signal_time, trend
-
-    if swing_high is None or swing_low is None:
-        return
+    global last_signal_time
 
     now = time.time()
     if now - last_signal_time < COOLDOWN:
         return
 
+    detect_swings()
+    structure = detect_structure(price)
     oi_type = detect_oi_type(get_oi_data())
 
-    # ================= CHOCH DETECTION =================
+    # ❌ Avoid sideways
+    if SUPPORT < price < RESISTANCE:
+        return
 
-    # Bullish CHOCH (trend reversal)
-    if trend == "DOWN" and price > swing_high:
-        trend = "UP"
+    # ================= CALL =================
+    if (
+        structure in ["BOS_BULLISH", "CHOCH_BULLISH"] and
+        oi_type in ["LONG_BUILDUP", "SHORT_COVERING"] and
+        price > RESISTANCE
+    ):
+        msg = f"""📈 CALL SIGNAL
 
-        send_alert(f"""🔄 CHOCH (BULLISH)
-Trend Change Detected
-
-Price: {price}""")
-
-    # Bearish CHOCH
-    elif trend == "UP" and price < swing_low:
-        trend = "DOWN"
-
-        send_alert(f"""🔄 CHOCH (BEARISH)
-Trend Change Detected
-
-Price: {price}""")
-
-    # ================= BOS =================
-
-    # 📈 Bullish BOS
-    elif price > swing_high and oi_type == "LONG_BUILDUP":
-        trend = "UP"
-        signal = "CALL"
-
-        if signal != last_signal:
-            msg = f"""📈 CALL SIGNAL (BOS)
-Trend: UP
+Structure: {structure}
+OI: {oi_type}
 
 Entry: {price}
-SL: {swing_low}
-Target: {price + 80}"""
+SL: {SUPPORT}
+Target: {price + 100}"""
 
-            send_alert(msg)
-            last_signal = signal
-            last_signal_time = now
+        send_alert(msg)
+        last_signal_time = now
 
-    # 📉 Bearish BOS
-    elif price < swing_low and oi_type == "SHORT_BUILDUP":
-        trend = "DOWN"
-        signal = "PUT"
+    # ================= PUT =================
+    elif (
+        structure in ["BOS_BEARISH", "CHOCH_BEARISH"] and
+        oi_type in ["SHORT_BUILDUP", "LONG_UNWINDING"] and
+        price < SUPPORT
+    ):
+        msg = f"""📉 PUT SIGNAL
 
-        if signal != last_signal:
-            msg = f"""📉 PUT SIGNAL (BOS)
-Trend: DOWN
+Structure: {structure}
+OI: {oi_type}
 
 Entry: {price}
-SL: {swing_high}
-Target: {price - 80}"""
+SL: {RESISTANCE}
+Target: {price - 100}"""
 
-            send_alert(msg)
-            last_signal = signal
-            last_signal_time = now
+        send_alert(msg)
+        last_signal_time = now
 
 # ================= MAIN =================
-send_alert("🔥 BOS + CHOCH BOT STARTED")
+send_alert("🔥 ULTIMATE BOT STARTED")
 
 while True:
     price = get_price()
