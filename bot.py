@@ -2,132 +2,93 @@ import requests
 import time
 from datetime import datetime
 
-# ================== TELEGRAM CONFIG ==================
+# ================= CONFIG =================
 BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
 CHAT_ID = "1674106249"
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+# ================= SEND ALERT =================
 def send_alert(msg):
-    try:
-        url = f"{BASE_URL}/sendMessage"
-        requests.post(url, json={
-            "chat_id": CHAT_ID,
-            "text": msg
-        }, timeout=5)
-    except Exception as e:
-        print("Telegram error:", e)
+    url = f"{BASE_URL}/sendMessage"
+    requests.post(url, json={
+        "chat_id": CHAT_ID,
+        "text": msg
+    })
 
-
-# ================== FETCH NIFTY (YAHOO SAFE) ==================
-def fetch_price():
+# ================= FETCH PRICE =================
+def get_price():
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
-        }
-
-        res = requests.get(url, headers=headers, timeout=5)
-
-        # ✅ check empty response (fix your error)
-        if not res.text:
-            print("Empty response from Yahoo")
-            return None
-
-        data = res.json()
-
-        # ✅ safe parsing
-        if "chart" not in data or data["chart"]["result"] is None:
-            print("Invalid Yahoo response:", data)
-            return None
-
-        price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
-        return float(price)
-
+        res = requests.get(url, timeout=5).json()
+        return res['chart']['result'][0]['meta']['regularMarketPrice']
     except Exception as e:
         print("Fetch error:", e)
         return None
 
-
-# ================== SIGNAL LOGIC ==================
-prices = []
+# ================= GLOBAL =================
 last_signal = None
+last_signal_time = 0
+COOLDOWN = 300  # 5 minutes
 
-def check_signal(price):
-    global last_signal
+# ================= SIGNAL LOGIC =================
+def check_signal(price, prev_price):
+    global last_signal, last_signal_time
 
-    prices.append(price)
-
-    # keep only last 3
-    if len(prices) > 3:
-        prices.pop(0)
-
-    if len(prices) < 3:
+    if prev_price is None:
         return
 
-    p1, p2, p3 = prices
+    now = time.time()
 
-    # 📈 CALL
-    if p1 < p2 < p3 and last_signal != "CALL":
-        strike = round(p3 / 50) * 50
+    # cooldown protection
+    if now - last_signal_time < COOLDOWN:
+        return
 
-        msg = f"""📈 CALL SIGNAL
-Strike: {strike} CE
-Entry: {p3}
-SL: {p3 - 20}
-Target: {p3 + 40}"""
+    # ================= LEVELS =================
+    RESISTANCE = 23960
+    SUPPORT = 23920
 
-        send_alert(msg)
-        last_signal = "CALL"
+    # ================= BREAKOUT CALL =================
+    if price > RESISTANCE and prev_price <= RESISTANCE:
+        signal = "CALL_BREAKOUT"
 
-    # 📉 PUT
-    elif p1 > p2 > p3 and last_signal != "PUT":
-        strike = round(p3 / 50) * 50
+        if signal != last_signal:
+            msg = f"""📈 CALL SIGNAL
+Strike: 24000 CE
+Entry: {price}
+SL: {price - 40}
+Target: {price + 80}"""
 
-        msg = f"""📉 PUT SIGNAL
-Strike: {strike} PE
-Entry: {p3}
-SL: {p3 + 20}
-Target: {p3 - 40}"""
+            send_alert(msg)
+            last_signal = signal
+            last_signal_time = now
 
-        send_alert(msg)
-        last_signal = "PUT"
+    # ================= REJECTION PUT =================
+    elif price < RESISTANCE and prev_price > RESISTANCE:
+        signal = "PUT_REJECTION"
+
+        if signal != last_signal:
+            msg = f"""📉 PUT SIGNAL
+Strike: 23900 PE
+Entry: {price}
+SL: {price + 40}
+Target: {price - 80}"""
+
+            send_alert(msg)
+            last_signal = signal
+            last_signal_time = now
 
 
-# ================== MAIN LOOP ==================
-last_price = None
+# ================= MAIN LOOP =================
+send_alert("🔥 BOT STARTED (SMART MODE)")
 
-send_alert("🔥 ULTIMATE BOT STARTED")
+prev_price = None
 
 while True:
-    try:
-        price = fetch_price()
+    price = get_price()
 
-        if price is None:
-            time.sleep(15)
-            continue
+    if price:
+        check_signal(price, prev_price)
+        prev_price = price
 
-        # avoid duplicate spam
-        if price == last_price:
-            time.sleep(15)
-            continue
-
-        last_price = price
-
-        print("NIFTY:", price)
-
-        now = datetime.now().strftime("%H:%M:%S")
-
-        send_alert(f"""📊 NIFTY LIVE
-LTP: {price}
-Time: {now}""")
-
-        check_signal(price)
-
-        time.sleep(20)  # ✅ safer delay for Yahoo
-
-    except Exception as e:
-        print("Main loop error:", e)
-        time.sleep(10)
+    time.sleep(10)
