@@ -1,97 +1,117 @@
 import requests
 import time
 
+# ================= CONFIG =================
 BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
 CHAT_ID = "1674106249"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+# ================= GLOBAL =================
 last_signal = None
-last_time = 0
+last_signal_time = 0
+COOLDOWN = 300  # 5 min
 
+# ================= TELEGRAM =================
 def send_alert(msg):
     requests.post(f"{BASE_URL}/sendMessage", json={
         "chat_id": CHAT_ID,
         "text": msg
     })
 
+# ================= PRICE =================
 def get_price():
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
-        return requests.get(url).json()['chart']['result'][0]['meta']['regularMarketPrice']
+        res = requests.get(url).json()
+        return res['chart']['result'][0]['meta']['regularMarketPrice']
     except:
         return None
 
-# 🔴 MOCK (replace with API later)
-def get_oi():
+# ================= MOCK OI (REPLACE LATER) =================
+def get_oi_data():
     return {
-        "put_oi_change": 5000,
-        "call_oi_change": 2000,
-        "put_price_change": 10,
-        "price_up": False
+        "price_change": -10,
+        "oi_change": 5000
     }
 
-def detect_trend(price, prev):
-    if prev is None:
-        return None
-    return "UP" if price > prev else "DOWN"
+# ================= OI TYPE =================
+def detect_oi_type(data):
+    price_change = data["price_change"]
+    oi_change = data["oi_change"]
 
+    if price_change > 0 and oi_change > 0:
+        return "LONG_BUILDUP"
+
+    elif price_change < 0 and oi_change > 0:
+        return "SHORT_BUILDUP"
+
+    elif price_change > 0 and oi_change < 0:
+        return "SHORT_COVERING"
+
+    elif price_change < 0 and oi_change < 0:
+        return "LONG_UNWINDING"
+
+    return None
+
+# ================= SIGNAL LOGIC =================
 def check_signal(price, prev_price):
-    global last_signal, last_time
+    global last_signal, last_signal_time
 
     if prev_price is None:
         return
 
-    trend = detect_trend(price, prev_price)
-    oi = get_oi()
+    now = time.time()
+    if now - last_signal_time < COOLDOWN:
+        return
 
+    # Levels (adjust as per market)
     RESISTANCE = 23960
     SUPPORT = 23920
 
-    now = time.time()
-    if now - last_time < 300:
-        return
+    # OI type
+    oi_data = get_oi_data()
+    oi_type = detect_oi_type(oi_data)
 
-    # 📉 PUT
+    # ================= PUT LOGIC =================
     if (
-        trend == "DOWN"
+        oi_type == "SHORT_BUILDUP"
         and price < RESISTANCE
-        and oi["put_oi_change"] > 0
-        and oi["put_price_change"] > 0
+        and prev_price > price
     ):
         signal = "PUT"
 
         if signal != last_signal:
             msg = f"""📉 PUT SIGNAL
-Strike: 23900 PE
+OI: SHORT BUILDUP
 Entry: {price}
 SL: {price + 40}
 Target: {price - 80}"""
 
             send_alert(msg)
             last_signal = signal
-            last_time = now
+            last_signal_time = now
 
-    # 📈 CALL
+    # ================= CALL LOGIC =================
     elif (
-        trend == "UP"
+        oi_type == "LONG_BUILDUP"
         and price > RESISTANCE
-        and oi["call_oi_change"] < 0
+        and prev_price < price
     ):
         signal = "CALL"
 
         if signal != last_signal:
             msg = f"""📈 CALL SIGNAL
-Strike: 24000 CE
+OI: LONG BUILDUP
 Entry: {price}
 SL: {price - 40}
 Target: {price + 80}"""
 
             send_alert(msg)
             last_signal = signal
-            last_time = now
+            last_signal_time = now
 
-
-send_alert("🔥 PRO BOT STARTED")
+# ================= MAIN =================
+send_alert("🔥 OI BOT STARTED")
 
 prev_price = None
 
