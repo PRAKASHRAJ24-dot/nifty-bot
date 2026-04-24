@@ -1,71 +1,64 @@
 import requests
 import time
-from datetime import datetime
 
-# ================= CONFIG =================
 BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
 CHAT_ID = "1674106249"
-
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ================= SEND ALERT =================
+last_signal = None
+last_time = 0
+
 def send_alert(msg):
-    url = f"{BASE_URL}/sendMessage"
-    requests.post(url, json={
+    requests.post(f"{BASE_URL}/sendMessage", json={
         "chat_id": CHAT_ID,
         "text": msg
     })
 
-# ================= FETCH PRICE =================
 def get_price():
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
-        res = requests.get(url, timeout=5).json()
-        return res['chart']['result'][0]['meta']['regularMarketPrice']
-    except Exception as e:
-        print("Fetch error:", e)
+        return requests.get(url).json()['chart']['result'][0]['meta']['regularMarketPrice']
+    except:
         return None
 
-# ================= GLOBAL =================
-last_signal = None
-last_signal_time = 0
-COOLDOWN = 300  # 5 minutes
+# 🔴 MOCK (replace with API later)
+def get_oi():
+    return {
+        "put_oi_change": 5000,
+        "call_oi_change": 2000,
+        "put_price_change": 10,
+        "price_up": False
+    }
 
-# ================= SIGNAL LOGIC =================
+def detect_trend(price, prev):
+    if prev is None:
+        return None
+    return "UP" if price > prev else "DOWN"
+
 def check_signal(price, prev_price):
-    global last_signal, last_signal_time
+    global last_signal, last_time
 
     if prev_price is None:
         return
 
-    now = time.time()
+    trend = detect_trend(price, prev_price)
+    oi = get_oi()
 
-    # cooldown protection
-    if now - last_signal_time < COOLDOWN:
-        return
-
-    # ================= LEVELS =================
     RESISTANCE = 23960
     SUPPORT = 23920
 
-    # ================= BREAKOUT CALL =================
-    if price > RESISTANCE and prev_price <= RESISTANCE:
-        signal = "CALL_BREAKOUT"
+    now = time.time()
+    if now - last_time < 300:
+        return
 
-        if signal != last_signal:
-            msg = f"""📈 CALL SIGNAL
-Strike: 24000 CE
-Entry: {price}
-SL: {price - 40}
-Target: {price + 80}"""
-
-            send_alert(msg)
-            last_signal = signal
-            last_signal_time = now
-
-    # ================= REJECTION PUT =================
-    elif price < RESISTANCE and prev_price > RESISTANCE:
-        signal = "PUT_REJECTION"
+    # 📉 PUT
+    if (
+        trend == "DOWN"
+        and price < RESISTANCE
+        and oi["put_oi_change"] > 0
+        and oi["put_price_change"] > 0
+    ):
+        signal = "PUT"
 
         if signal != last_signal:
             msg = f"""📉 PUT SIGNAL
@@ -76,11 +69,29 @@ Target: {price - 80}"""
 
             send_alert(msg)
             last_signal = signal
-            last_signal_time = now
+            last_time = now
+
+    # 📈 CALL
+    elif (
+        trend == "UP"
+        and price > RESISTANCE
+        and oi["call_oi_change"] < 0
+    ):
+        signal = "CALL"
+
+        if signal != last_signal:
+            msg = f"""📈 CALL SIGNAL
+Strike: 24000 CE
+Entry: {price}
+SL: {price - 40}
+Target: {price + 80}"""
+
+            send_alert(msg)
+            last_signal = signal
+            last_time = now
 
 
-# ================= MAIN LOOP =================
-send_alert("🔥 BOT STARTED (SMART MODE)")
+send_alert("🔥 PRO BOT STARTED")
 
 prev_price = None
 
