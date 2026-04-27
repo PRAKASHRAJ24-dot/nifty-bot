@@ -7,7 +7,8 @@ CHAT_ID = "1674106249"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 CHECK_INTERVAL = 60
-REQUEST_DELAY = 1  # prevent rate limit
+REQUEST_DELAY = 1
+OI_REFRESH_INTERVAL = 300  # 5 min
 
 # ================= SYMBOLS =================
 INDEX_SYMBOLS = {
@@ -25,8 +26,11 @@ SECTOR_STOCKS = {
     "PHARMA": ["SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS"]
 }
 
+# ================= STATE =================
 price_history = {}
 STARTED = False
+cached_oi_bias = None
+last_oi_fetch = 0
 
 # ================= TELEGRAM =================
 def send_alert(msg):
@@ -35,45 +39,75 @@ def send_alert(msg):
             "chat_id": CHAT_ID,
             "text": msg
         })
-    except Exception as e:
-        print("Telegram Error:", e)
+    except:
+        pass
 
-# ================= SAFE FETCH =================
+# ================= PRICE FETCH =================
 def get_price(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         response = requests.get(url, timeout=5)
 
-        # check response validity
         if response.status_code != 200 or not response.text.strip():
-            print(f"⚠️ Empty response for {symbol}")
             return None, None
 
         data = response.json()
-
         result = data.get('chart', {}).get('result')
         if not result:
-            print(f"⚠️ No result for {symbol}")
             return None, None
 
-        meta = result[0].get('meta', {})
-
-        price = meta.get('regularMarketPrice')
+        meta = result[0]['meta']
+        price = meta.get('regularMarketPrice') or meta.get('chartPreviousClose')
         prev = meta.get('previousClose')
 
-        if price is None:
-            price = meta.get('chartPreviousClose')
-
         if price is None or prev is None:
-            print(f"⚠️ Missing data for {symbol}")
             return None, None
 
         change = ((price - prev) / prev) * 100
         return price, round(change, 2)
 
-    except Exception as e:
-        print(f"🔥 Data Error ({symbol}):", e)
+    except:
         return None, None
+
+# ================= NSE OI =================
+def fetch_nse_oi():
+    try:
+        session = requests.Session()
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        session.get("https://www.nseindia.com", headers=headers)
+
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        res = session.get(url, headers=headers).json()
+
+        data = res.get("records", {}).get("data", [])
+
+        total_call_oi = 0
+        total_put_oi = 0
+
+        for strike in data:
+            ce = strike.get("CE")
+            pe = strike.get("PE")
+
+            if ce:
+                total_call_oi += ce.get("openInterest", 0)
+            if pe:
+                total_put_oi += pe.get("openInterest", 0)
+
+        if total_put_oi > total_call_oi:
+            return "BULLISH"
+        elif total_call_oi > total_put_oi:
+            return "BEARISH"
+
+        return "NEUTRAL"
+
+    except Exception as e:
+        print("OI Error:", e)
+        return None
 
 # ================= LOGIC =================
 def classify(diff):
@@ -113,10 +147,10 @@ def momentum(name, price):
 
 # ================= MAIN =================
 def run():
-    global STARTED
+    global STARTED, cached_oi_bias, last_oi_fetch
 
     if not STARTED:
-        send_alert("🧠 ELITE Trading System Started")
+        send_alert("🧠 ELITE + OI Trading System Started")
         STARTED = True
 
     while True:
@@ -124,7 +158,7 @@ def run():
             data = {}
             prices = {}
 
-            # ===== FETCH INDEX DATA =====
+            # ===== FETCH INDEX =====
             for name, symbol in INDEX_SYMBOLS.items():
                 price, change = get_price(symbol)
                 time.sleep(REQUEST_DELAY)
@@ -133,26 +167,18 @@ def run():
                     data[name] = change
                     prices[name] = price
 
-            print("DEBUG:", data)
-
-            # ===== SAFETY CHECK =====
-            if not data:
-                print("⚠️ No data fetched, retrying...")
-                time.sleep(10)
-                continue
-
-            if "NIFTY" not in data:
+            if not data or "NIFTY" not in data:
                 time.sleep(10)
                 continue
 
             nifty = data["NIFTY"]
             trend = market_trend(nifty)
 
-            # ===== MARKET CLOSED =====
-            if all(v == 0 for v in data.values()):
-                send_alert("⏸️ Market closed / no movement")
-                time.sleep(300)
-                continue
+            # ===== FETCH OI (cached) =====
+            if time.time() - last_oi_fetch > OI_REFRESH_INTERVAL:
+                cached_oi_bias = fetch_nse_oi()
+                last_oi_fetch = time.time()
+                print("OI Bias:", cached_oi_bias)
 
             # ===== FIND BEST SECTOR =====
             best_sector = None
@@ -186,7 +212,6 @@ def run():
                 m = momentum(stock, price)
 
                 score = 0
-
                 if change > 0.5:
                     score += 1
                 if m == "UP":
@@ -202,8 +227,13 @@ def run():
 
             stock, price, change, m = best_stock
 
-            # ===== FINAL FILTER =====
-            if best_diff > 0.5 and m == "UP" and trend != "BEARISH":
+            # ===== FINAL FILTER (WITH OI) =====
+            if (
+                best_diff > 0.5 and
+                m == "UP" and
+                trend != "BEARISH" and
+                cached_oi_bias != "BEARISH"
+            ):
 
                 msg = f"""
 🔥 ELITE TRADE
@@ -213,23 +243,23 @@ Stock: {stock}
 Signal: BUY
 
 Market: {trend}
+OI Bias: {cached_oi_bias}
 
 Price: {price}
 
 Reason:
 - Sector leader
-- Strong momentum
-- Market aligned
+- Momentum breakout
+- OI support
 
 Confidence: HIGH
 """
-
                 send_alert(msg)
 
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print("🔥 MAIN ERROR:", e)
+            print("ERROR:", e)
             time.sleep(10)
 
 # ================= RUN =================
