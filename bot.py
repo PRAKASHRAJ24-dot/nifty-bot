@@ -7,18 +7,24 @@ CHAT_ID = "1674106249"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 CHECK_INTERVAL = 60
+REQUEST_DELAY = 1  # prevent rate limit
 
 # ================= SYMBOLS =================
-SYMBOLS = {
+INDEX_SYMBOLS = {
     "NIFTY": "%5ENSEI",
     "BANK": "%5ENSEBANK",
     "IT": "%5ECNXIT",
     "PHARMA": "%5ECNXPHARMA",
-    "FMCG": "%5ECNXFMCG",
     "AUTO": "%5ECNXAUTO"
 }
 
-# ================= STATE =================
+SECTOR_STOCKS = {
+    "IT": ["INFY.NS", "TCS.NS", "WIPRO.NS"],
+    "BANK": ["ICICIBANK.NS", "HDFCBANK.NS", "SBIN.NS"],
+    "AUTO": ["TATAMOTORS.NS", "M&M.NS", "MARUTI.NS"],
+    "PHARMA": ["SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS"]
+}
+
 price_history = {}
 STARTED = False
 
@@ -32,17 +38,26 @@ def send_alert(msg):
     except Exception as e:
         print("Telegram Error:", e)
 
-# ================= DATA =================
+# ================= SAFE FETCH =================
 def get_price(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        res = requests.get(url, timeout=5).json()
+        response = requests.get(url, timeout=5)
 
-        result = res.get('chart', {}).get('result')
+        # check response validity
+        if response.status_code != 200 or not response.text.strip():
+            print(f"⚠️ Empty response for {symbol}")
+            return None, None
+
+        data = response.json()
+
+        result = data.get('chart', {}).get('result')
         if not result:
+            print(f"⚠️ No result for {symbol}")
             return None, None
 
         meta = result[0].get('meta', {})
+
         price = meta.get('regularMarketPrice')
         prev = meta.get('previousClose')
 
@@ -50,24 +65,17 @@ def get_price(symbol):
             price = meta.get('chartPreviousClose')
 
         if price is None or prev is None:
+            print(f"⚠️ Missing data for {symbol}")
             return None, None
 
         change = ((price - prev) / prev) * 100
         return price, round(change, 2)
 
     except Exception as e:
-        print("Data Error:", e)
+        print(f"🔥 Data Error ({symbol}):", e)
         return None, None
 
-# ================= MARKET TREND =================
-def get_market_trend(nifty_change):
-    if nifty_change > 0.3:
-        return "BULLISH"
-    elif nifty_change < -0.3:
-        return "BEARISH"
-    return "SIDEWAYS"
-
-# ================= CLASSIFY =================
+# ================= LOGIC =================
 def classify(diff):
     if diff > 0.5:
         return "STRONG"
@@ -75,8 +83,14 @@ def classify(diff):
         return "WEAK"
     return "NEUTRAL"
 
-# ================= MOMENTUM =================
-def detect_momentum(name, price):
+def market_trend(nifty):
+    if nifty > 0.3:
+        return "BULLISH"
+    elif nifty < -0.3:
+        return "BEARISH"
+    return "SIDEWAYS"
+
+def momentum(name, price):
     if name not in price_history:
         price_history[name] = []
 
@@ -88,11 +102,11 @@ def detect_momentum(name, price):
     if len(price_history[name]) < 5:
         return None
 
-    recent = price_history[name]
+    r = price_history[name]
 
-    if recent[-1] > max(recent[:-1]):
+    if r[-1] > max(r[:-1]):
         return "UP"
-    elif recent[-1] < min(recent[:-1]):
+    elif r[-1] < min(r[:-1]):
         return "DOWN"
 
     return "SIDEWAYS"
@@ -102,7 +116,7 @@ def run():
     global STARTED
 
     if not STARTED:
-        send_alert("🧠 PRO Trading Brain Started")
+        send_alert("🧠 ELITE Trading System Started")
         STARTED = True
 
     while True:
@@ -110,9 +124,10 @@ def run():
             data = {}
             prices = {}
 
-            # ===== Fetch Data =====
-            for name, symbol in SYMBOLS.items():
+            # ===== FETCH INDEX DATA =====
+            for name, symbol in INDEX_SYMBOLS.items():
                 price, change = get_price(symbol)
+                time.sleep(REQUEST_DELAY)
 
                 if price is not None:
                     data[name] = change
@@ -120,66 +135,93 @@ def run():
 
             print("DEBUG:", data)
 
+            # ===== SAFETY CHECK =====
+            if not data:
+                print("⚠️ No data fetched, retrying...")
+                time.sleep(10)
+                continue
+
             if "NIFTY" not in data:
                 time.sleep(10)
                 continue
 
             nifty = data["NIFTY"]
-            market_trend = get_market_trend(nifty)
+            trend = market_trend(nifty)
 
-            # ===== Market Closed Detection =====
+            # ===== MARKET CLOSED =====
             if all(v == 0 for v in data.values()):
                 send_alert("⏸️ Market closed / no movement")
                 time.sleep(300)
                 continue
 
-            signals = []
+            # ===== FIND BEST SECTOR =====
+            best_sector = None
+            best_diff = -999
 
-            # ===== SIGNAL ENGINE =====
             for sector in data:
                 if sector == "NIFTY":
                     continue
 
                 diff = data[sector] - nifty
-                state = classify(diff)
 
-                momentum = detect_momentum(sector, prices[sector])
+                if diff > best_diff:
+                    best_diff = diff
+                    best_sector = sector
 
-                # ===== BUY CONDITION =====
-                if (
-                    state == "STRONG" and
-                    momentum == "UP" and
-                    market_trend != "BEARISH"
-                ):
-                    signals.append((sector, "BUY", prices[sector], state, momentum))
+            if best_sector not in SECTOR_STOCKS:
+                time.sleep(CHECK_INTERVAL)
+                continue
 
-                # ===== SELL CONDITION =====
-                elif (
-                    state == "WEAK" and
-                    momentum == "DOWN" and
-                    market_trend != "BULLISH"
-                ):
-                    signals.append((sector, "SELL", prices[sector], state, momentum))
+            # ===== SCAN STOCKS =====
+            best_stock = None
+            best_score = -999
 
-            # ===== SEND SIGNALS =====
-            for s in signals:
-                sector, signal, price, state, momentum = s
+            for stock in SECTOR_STOCKS[best_sector]:
+                price, change = get_price(stock)
+                time.sleep(REQUEST_DELAY)
+
+                if price is None:
+                    continue
+
+                m = momentum(stock, price)
+
+                score = 0
+
+                if change > 0.5:
+                    score += 1
+                if m == "UP":
+                    score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_stock = (stock, price, change, m)
+
+            if not best_stock:
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            stock, price, change, m = best_stock
+
+            # ===== FINAL FILTER =====
+            if best_diff > 0.5 and m == "UP" and trend != "BEARISH":
 
                 msg = f"""
-🚀 TRADE SETUP
+🔥 ELITE TRADE
 
-Sector: {sector}
-Signal: {signal}
-Market: {market_trend}
+Sector: {best_sector}
+Stock: {stock}
+Signal: BUY
+
+Market: {trend}
 
 Price: {price}
 
-Analysis:
-- Sector: {state}
-- Momentum: {momentum}
+Reason:
+- Sector leader
+- Strong momentum
+- Market aligned
 
-Target: {round(price * 1.01, 2)}
-SL: {round(price * 0.995, 2)}
+Confidence: HIGH
 """
 
                 send_alert(msg)
