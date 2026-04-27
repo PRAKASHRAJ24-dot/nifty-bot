@@ -32,15 +32,23 @@ def send_alert(msg):
     except Exception as e:
         print("Telegram Error:", e)
 
-# ================= FETCH =================
+# ================= SAFE FETCH =================
 def get_data(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         res = requests.get(url, timeout=5).json()
 
-        meta = res['chart']['result'][0]['meta']
-        price = meta['regularMarketPrice']
-        prev = meta['previousClose']
+        result = res.get('chart', {}).get('result')
+
+        if not result:
+            return None
+
+        meta = result[0].get('meta', {})
+        price = meta.get('regularMarketPrice')
+        prev = meta.get('previousClose')
+
+        if price is None or prev is None:
+            return None
 
         change = ((price - prev) / prev) * 100
         return round(change, 2)
@@ -52,11 +60,11 @@ def get_data(symbol):
 # ================= CLASSIFY =================
 def classify(diff):
     if diff > 0.5:
-        return "STRONG"
+        return "🚀 STRONG"
     elif diff < -0.5:
-        return "WEAK"
+        return "🔻 WEAK"
     else:
-        return "NEUTRAL"
+        return "⚖️ NEUTRAL"
 
 # ================= MAIN =================
 def run():
@@ -64,71 +72,77 @@ def run():
     send_alert("🔥 Smart Sector Scanner Started")
 
     while True:
-        data = {}
+        try:
+            data = {}
 
-        # ===== Fetch Data =====
-        for name, symbol in SYMBOLS.items():
-            val = get_data(symbol)
-            if val is not None:
-                data[name] = val
+            # ===== Fetch Data =====
+            for name, symbol in SYMBOLS.items():
+                val = get_data(symbol)
+                if val is not None:
+                    data[name] = val
 
-        print("DEBUG DATA:", data)
+            print("DEBUG DATA:", data)
 
-        if "NIFTY" not in data:
-            print("⚠️ No NIFTY data, retrying...")
-            time.sleep(10)
-            continue
-
-        nifty = data["NIFTY"]
-
-        sector_scores = []
-
-        # ===== Compute relative strength =====
-        for sector in data:
-            if sector == "NIFTY":
+            # ===== Check NIFTY =====
+            if "NIFTY" not in data:
+                print("⚠️ No NIFTY data, retrying...")
+                time.sleep(10)
                 continue
 
-            diff = data[sector] - nifty
-            state = classify(diff)
+            nifty = data["NIFTY"]
 
-            sector_scores.append((sector, data[sector], diff, state))
+            sector_scores = []
 
-        # ===== Sort (Ranking) =====
-        sector_scores.sort(key=lambda x: x[2], reverse=True)
+            # ===== Compute relative strength =====
+            for sector in data:
+                if sector == "NIFTY":
+                    continue
 
-        # ===== Build Snapshot Message =====
-        msg = f"📊 Sector Rotation (Ranked)\nNIFTY: {nifty}%\n\n"
+                diff = data[sector] - nifty
+                state = classify(diff)
 
-        for s in sector_scores:
-            msg += f"{s[0]}: {s[1]}% → {s[3]}\n"
+                sector_scores.append((sector, data[sector], diff, state))
 
-        print(msg)
+            # ===== Sort sectors =====
+            sector_scores.sort(key=lambda x: x[2], reverse=True)
 
-        # ✅ Always send snapshot
-        send_alert(msg)
+            # ===== Build snapshot =====
+            msg = f"📊 Sector Rotation (Ranked)\nNIFTY: {nifty}%\n\n"
 
-        # ===== Detect Rotation Changes =====
-        alerts = []
+            for s in sector_scores:
+                msg += f"{s[0]}: {s[1]}% → {s[3]}\n"
 
-        for sector, change, diff, state in sector_scores:
-            prev = previous_states.get(sector)
+            print(msg)
 
-            # ✅ First run
-            if prev is None:
-                alerts.append(f"{sector}: {state} (initial)")
+            # ✅ Always send snapshot
+            send_alert(msg)
 
-            # ✅ State changed
-            elif prev != state:
-                alerts.append(f"{sector}: {prev} → {state}")
+            # ===== Detect rotation changes =====
+            alerts = []
 
-            previous_states[sector] = state
+            for sector, change, diff, state in sector_scores:
+                prev = previous_states.get(sector)
 
-        # ===== Send Rotation Alert =====
-        if alerts:
-            alert_msg = "🚨 Rotation Shift Detected\n\n" + "\n".join(alerts)
-            send_alert(alert_msg)
+                # First run
+                if prev is None:
+                    alerts.append(f"{sector}: {state} (initial)")
 
-        time.sleep(CHECK_INTERVAL)
+                # Change detection
+                elif prev != state:
+                    alerts.append(f"{sector}: {prev} → {state}")
+
+                previous_states[sector] = state
+
+            # ===== Send change alerts =====
+            if alerts:
+                alert_msg = "🚨 Rotation Shift Detected\n\n" + "\n".join(alerts)
+                send_alert(alert_msg)
+
+            time.sleep(CHECK_INTERVAL)
+
+        except Exception as e:
+            print("🔥 MAIN LOOP ERROR:", e)
+            time.sleep(10)
 
 # ================= RUN =================
 if __name__ == "__main__":
