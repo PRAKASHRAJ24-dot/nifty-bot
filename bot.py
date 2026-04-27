@@ -26,7 +26,7 @@ def send_alert(msg):
 def get_price():
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
-        res = requests.get(url, timeout=5).json()
+        res = requests.get(url).json()
         meta = res['chart']['result'][0]['meta']
         return meta.get('regularMarketPrice') or meta.get('chartPreviousClose')
     except:
@@ -47,66 +47,35 @@ def get_oi():
 
 # ================= GLOBAL =================
 price_history = []
-prev_strike_oi = {}
+confirm_buffer = []
 
-# ================= EXTRACT =================
-def extract_strikes(data):
+# ================= STRIKE LEVELS =================
+def get_levels(data):
     strikes = []
 
     for d in data:
-        strike = d.get("strikePrice")
         ce = d.get("CE", {})
         pe = d.get("PE", {})
 
         strikes.append({
-            "strike": strike,
-            "call_oi": ce.get("openInterest", 0),
-            "put_oi": pe.get("openInterest", 0)
+            "strike": d["strikePrice"],
+            "call": ce.get("openInterest", 0),
+            "put": pe.get("openInterest", 0)
         })
 
-    return strikes
+    resistance = max(strikes, key=lambda x: x["call"])["strike"]
+    support = max(strikes, key=lambda x: x["put"])["strike"]
 
-# ================= FIND LEVELS =================
-def find_levels(strikes):
-    max_call = max(strikes, key=lambda x: x["call_oi"])
-    max_put = max(strikes, key=lambda x: x["put_oi"])
-
-    return max_call["strike"], max_put["strike"]
-
-# ================= OI SHIFT =================
-def oi_shift(strikes):
-    global prev_strike_oi
-
-    shift_signal = []
-
-    for s in strikes:
-        strike = s["strike"]
-        call = s["call_oi"]
-        put = s["put_oi"]
-
-        prev = prev_strike_oi.get(strike, {"call": call, "put": put})
-
-        call_change = call - prev["call"]
-        put_change = put - prev["put"]
-
-        if call_change > 0:
-            shift_signal.append(("CALL_BUILD", strike))
-
-        if put_change > 0:
-            shift_signal.append(("PUT_BUILD", strike))
-
-        prev_strike_oi[strike] = {"call": call, "put": put}
-
-    return shift_signal
+    return resistance, support
 
 # ================= BREAKOUT =================
-def detect_breakout(price):
+def breakout(price):
     price_history.append(price)
 
-    if len(price_history) > 15:
+    if len(price_history) > 10:
         price_history.pop(0)
 
-    if len(price_history) < 6:
+    if len(price_history) < 5:
         return None
 
     high = max(price_history[:-1])
@@ -119,11 +88,29 @@ def detect_breakout(price):
 
     return None
 
+# ================= CONFIRMATION =================
+def confirm_breakout(price, level, direction):
+    confirm_buffer.append(price)
+
+    if len(confirm_buffer) > 3:
+        confirm_buffer.pop(0)
+
+    if len(confirm_buffer) < 3:
+        return False
+
+    if direction == "UP":
+        return all(p > level for p in confirm_buffer)
+
+    if direction == "DOWN":
+        return all(p < level for p in confirm_buffer)
+
+    return False
+
 # ================= MAIN =================
 def run():
     global last_signal_time
 
-    send_alert("🚀 STRIKE-LEVEL OI SYSTEM STARTED")
+    send_alert("🔥 FINAL PRO TRADING SYSTEM STARTED")
 
     last_oi_time = 0
     resistance = None
@@ -137,23 +124,17 @@ def run():
                 time.sleep(10)
                 continue
 
-            breakout = detect_breakout(price)
+            move = breakout(price)
 
             # ===== FETCH OI =====
             if time.time() - last_oi_time > OI_REFRESH:
                 raw = get_oi()
                 if raw:
-                    strikes = extract_strikes(raw)
-
-                    resistance, support = find_levels(strikes)
-                    shifts = oi_shift(strikes)
-
-                    print("Resistance:", resistance, "Support:", support)
-                    print("OI Shifts:", shifts)
-
+                    resistance, support = get_levels(raw)
+                    print("R:", resistance, "S:", support)
                     last_oi_time = time.time()
 
-            print(f"Price: {price} | Breakout: {breakout}")
+            print(f"Price: {price} | Move: {move}")
 
             now = time.time()
             if now - last_signal_time < COOLDOWN:
@@ -161,36 +142,50 @@ def run():
                 continue
 
             # ===== BUY =====
-            if breakout == "UP" and price > resistance:
-                send_alert(f"""
-🚀 BUY BREAKOUT
+            if move == "UP" and resistance:
+                if confirm_breakout(price, resistance, "UP"):
 
-Price: {price}
-Resistance: {resistance}
-Support: {support}
+                    entry = price
+                    sl = resistance - 20
+                    target = entry + 60
+
+                    send_alert(f"""
+🚀 CONFIRMED BUY
+
+Entry: {entry}
+SL: {sl}
+Target: {target}
 
 Reason:
 - Resistance broken
-- Call wall cleared
-- Upside open
+- Sustained above level
+- Real breakout (not trap)
 """)
-                last_signal_time = now
+
+                    last_signal_time = now
 
             # ===== SELL =====
-            elif breakout == "DOWN" and price < support:
-                send_alert(f"""
-📉 SELL BREAKDOWN
+            if move == "DOWN" and support:
+                if confirm_breakout(price, support, "DOWN"):
 
-Price: {price}
-Resistance: {resistance}
-Support: {support}
+                    entry = price
+                    sl = support + 20
+                    target = entry - 60
+
+                    send_alert(f"""
+📉 CONFIRMED SELL
+
+Entry: {entry}
+SL: {sl}
+Target: {target}
 
 Reason:
 - Support broken
-- Put wall failed
-- Downside open
+- Sustained below level
+- Real breakdown
 """)
-                last_signal_time = now
+
+                    last_signal_time = now
 
             time.sleep(CHECK_INTERVAL)
 
