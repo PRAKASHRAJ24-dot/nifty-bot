@@ -24,10 +24,11 @@ previous_states = {}
 # ================= TELEGRAM =================
 def send_alert(msg):
     try:
-        requests.post(f"{BASE_URL}/sendMessage", json={
-            "chat_id": CHAT_ID,
-            "text": msg
-        })
+        res = requests.post(
+            f"{BASE_URL}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": msg}
+        )
+        print("Telegram:", res.json())
     except Exception as e:
         print("Telegram Error:", e)
 
@@ -35,15 +36,17 @@ def send_alert(msg):
 def get_data(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        res = requests.get(url).json()
-        meta = res['chart']['result'][0]['meta']
+        res = requests.get(url, timeout=5).json()
 
+        meta = res['chart']['result'][0]['meta']
         price = meta['regularMarketPrice']
         prev = meta['previousClose']
 
-        return round(((price - prev) / prev) * 100, 2)
+        change = ((price - prev) / prev) * 100
+        return round(change, 2)
 
-    except:
+    except Exception as e:
+        print(f"Error fetching {symbol}:", e)
         return None
 
 # ================= CLASSIFY =================
@@ -63,12 +66,16 @@ def run():
     while True:
         data = {}
 
+        # ===== Fetch Data =====
         for name, symbol in SYMBOLS.items():
             val = get_data(symbol)
             if val is not None:
                 data[name] = val
 
+        print("DEBUG DATA:", data)
+
         if "NIFTY" not in data:
+            print("⚠️ No NIFTY data, retrying...")
             time.sleep(10)
             continue
 
@@ -76,6 +83,7 @@ def run():
 
         sector_scores = []
 
+        # ===== Compute relative strength =====
         for sector in data:
             if sector == "NIFTY":
                 continue
@@ -85,29 +93,37 @@ def run():
 
             sector_scores.append((sector, data[sector], diff, state))
 
-        # ================= SORT (Ranking) =================
+        # ===== Sort (Ranking) =====
         sector_scores.sort(key=lambda x: x[2], reverse=True)
 
-        # ================= BUILD MESSAGE =================
+        # ===== Build Snapshot Message =====
         msg = f"📊 Sector Rotation (Ranked)\nNIFTY: {nifty}%\n\n"
 
         for s in sector_scores:
-            msg += f"{s[0]}: {s[1]}% ({s[3]})\n"
+            msg += f"{s[0]}: {s[1]}% → {s[3]}\n"
 
         print(msg)
 
-        # ================= ALERT ONLY ON CHANGE =================
+        # ✅ Always send snapshot
+        send_alert(msg)
+
+        # ===== Detect Rotation Changes =====
         alerts = []
 
         for sector, change, diff, state in sector_scores:
             prev = previous_states.get(sector)
 
-            if prev and prev != state:
+            # ✅ First run
+            if prev is None:
+                alerts.append(f"{sector}: {state} (initial)")
+
+            # ✅ State changed
+            elif prev != state:
                 alerts.append(f"{sector}: {prev} → {state}")
 
             previous_states[sector] = state
 
-        # ================= SEND ALERT =================
+        # ===== Send Rotation Alert =====
         if alerts:
             alert_msg = "🚨 Rotation Shift Detected\n\n" + "\n".join(alerts)
             send_alert(alert_msg)
