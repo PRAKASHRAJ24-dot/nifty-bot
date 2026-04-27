@@ -6,167 +6,114 @@ BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
 CHAT_ID = "1674106249"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ================= GLOBAL =================
-price_history = []
-MAX_HISTORY = 30
+CHECK_INTERVAL = 60  # seconds
 
-last_signal_time = 0
-COOLDOWN = 300
+# ================= SYMBOLS =================
+SYMBOLS = {
+    "NIFTY": "%5ENSEI",
+    "BANK": "%5ENSEBANK",
+    "IT": "%5ECNXIT",
+    "PHARMA": "%5ECNXPHARMA",
+    "FMCG": "%5ECNXFMCG",
+    "AUTO": "%5ECNXAUTO"
+}
 
-swing_high = None
-swing_low = None
-trend = None
-
-# ================= LEVELS =================
-SUPPORT = 24060
-RESISTANCE = 24150
+# ================= STATE =================
+previous_states = {}
 
 # ================= TELEGRAM =================
 def send_alert(msg):
-    requests.post(f"{BASE_URL}/sendMessage", json={
-        "chat_id": CHAT_ID,
-        "text": msg
-    })
-
-# ================= PRICE =================
-def get_price():
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
+        requests.post(f"{BASE_URL}/sendMessage", json={
+            "chat_id": CHAT_ID,
+            "text": msg
+        })
+    except Exception as e:
+        print("Telegram Error:", e)
+
+# ================= FETCH =================
+def get_data(symbol):
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         res = requests.get(url).json()
-        return res['chart']['result'][0]['meta']['regularMarketPrice']
+        meta = res['chart']['result'][0]['meta']
+
+        price = meta['regularMarketPrice']
+        prev = meta['previousClose']
+
+        return round(((price - prev) / prev) * 100, 2)
+
     except:
         return None
 
-# ================= OI MOCK =================
-def get_oi_data():
-    return {
-        "price_change": 10,
-        "oi_change": 5000
-    }
-
-def detect_oi_type(data):
-    pc = data["price_change"]
-    oi = data["oi_change"]
-
-    if pc > 0 and oi > 0:
-        return "LONG_BUILDUP"
-    elif pc < 0 and oi > 0:
-        return "SHORT_BUILDUP"
-    elif pc > 0 and oi < 0:
-        return "SHORT_COVERING"
-    elif pc < 0 and oi < 0:
-        return "LONG_UNWINDING"
-    return None
-
-# ================= PRICE UPDATE =================
-def update_price(price):
-    price_history.append(price)
-    if len(price_history) > MAX_HISTORY:
-        price_history.pop(0)
-
-# ================= SWING DETECTION =================
-def detect_swings():
-    global swing_high, swing_low
-
-    if len(price_history) < 5:
-        return
-
-    for i in range(2, len(price_history)-2):
-        p = price_history[i]
-
-        if p > price_history[i-1] and p > price_history[i+1]:
-            swing_high = p
-
-        if p < price_history[i-1] and p < price_history[i+1]:
-            swing_low = p
-
-# ================= STRUCTURE =================
-def detect_structure(price):
-    global trend
-
-    if swing_high is None or swing_low is None:
-        return None
-
-    # CHOCH
-    if trend == "DOWN" and price > swing_high:
-        trend = "UP"
-        return "CHOCH_BULLISH"
-
-    elif trend == "UP" and price < swing_low:
-        trend = "DOWN"
-        return "CHOCH_BEARISH"
-
-    # BOS
-    if price > swing_high:
-        trend = "UP"
-        return "BOS_BULLISH"
-
-    elif price < swing_low:
-        trend = "DOWN"
-        return "BOS_BEARISH"
-
-    return None
-
-# ================= SIGNAL =================
-def check_signal(price):
-    global last_signal_time
-
-    now = time.time()
-    if now - last_signal_time < COOLDOWN:
-        return
-
-    detect_swings()
-    structure = detect_structure(price)
-    oi_type = detect_oi_type(get_oi_data())
-
-    # ❌ Avoid sideways
-    if SUPPORT < price < RESISTANCE:
-        return
-
-    # ================= CALL =================
-    if (
-        structure in ["BOS_BULLISH", "CHOCH_BULLISH"] and
-        oi_type in ["LONG_BUILDUP", "SHORT_COVERING"] and
-        price > RESISTANCE
-    ):
-        msg = f"""📈 CALL SIGNAL
-
-Structure: {structure}
-OI: {oi_type}
-
-Entry: {price}
-SL: {SUPPORT}
-Target: {price + 100}"""
-
-        send_alert(msg)
-        last_signal_time = now
-
-    # ================= PUT =================
-    elif (
-        structure in ["BOS_BEARISH", "CHOCH_BEARISH"] and
-        oi_type in ["SHORT_BUILDUP", "LONG_UNWINDING"] and
-        price < SUPPORT
-    ):
-        msg = f"""📉 PUT SIGNAL
-
-Structure: {structure}
-OI: {oi_type}
-
-Entry: {price}
-SL: {RESISTANCE}
-Target: {price - 100}"""
-
-        send_alert(msg)
-        last_signal_time = now
+# ================= CLASSIFY =================
+def classify(diff):
+    if diff > 0.5:
+        return "STRONG"
+    elif diff < -0.5:
+        return "WEAK"
+    else:
+        return "NEUTRAL"
 
 # ================= MAIN =================
-send_alert("🔥 ULTIMATE BOT STARTED")
+def run():
+    print("🚀 Smart Sector Scanner Started")
+    send_alert("🔥 Smart Sector Scanner Started")
 
-while True:
-    price = get_price()
+    while True:
+        data = {}
 
-    if price:
-        update_price(price)
-        check_signal(price)
+        for name, symbol in SYMBOLS.items():
+            val = get_data(symbol)
+            if val is not None:
+                data[name] = val
 
-    time.sleep(10)
+        if "NIFTY" not in data:
+            time.sleep(10)
+            continue
+
+        nifty = data["NIFTY"]
+
+        sector_scores = []
+
+        for sector in data:
+            if sector == "NIFTY":
+                continue
+
+            diff = data[sector] - nifty
+            state = classify(diff)
+
+            sector_scores.append((sector, data[sector], diff, state))
+
+        # ================= SORT (Ranking) =================
+        sector_scores.sort(key=lambda x: x[2], reverse=True)
+
+        # ================= BUILD MESSAGE =================
+        msg = f"📊 Sector Rotation (Ranked)\nNIFTY: {nifty}%\n\n"
+
+        for s in sector_scores:
+            msg += f"{s[0]}: {s[1]}% ({s[3]})\n"
+
+        print(msg)
+
+        # ================= ALERT ONLY ON CHANGE =================
+        alerts = []
+
+        for sector, change, diff, state in sector_scores:
+            prev = previous_states.get(sector)
+
+            if prev and prev != state:
+                alerts.append(f"{sector}: {prev} → {state}")
+
+            previous_states[sector] = state
+
+        # ================= SEND ALERT =================
+        if alerts:
+            alert_msg = "🚨 Rotation Shift Detected\n\n" + "\n".join(alerts)
+            send_alert(alert_msg)
+
+        time.sleep(CHECK_INTERVAL)
+
+# ================= RUN =================
+if __name__ == "__main__":
+    run()
