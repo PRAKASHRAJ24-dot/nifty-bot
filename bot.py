@@ -7,30 +7,10 @@ CHAT_ID = "1674106249"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 CHECK_INTERVAL = 60
-REQUEST_DELAY = 1
-OI_REFRESH_INTERVAL = 300  # 5 min
+OI_REFRESH = 120
+COOLDOWN = 300
 
-# ================= SYMBOLS =================
-INDEX_SYMBOLS = {
-    "NIFTY": "%5ENSEI",
-    "BANK": "%5ENSEBANK",
-    "IT": "%5ECNXIT",
-    "PHARMA": "%5ECNXPHARMA",
-    "AUTO": "%5ECNXAUTO"
-}
-
-SECTOR_STOCKS = {
-    "IT": ["INFY.NS", "TCS.NS", "WIPRO.NS"],
-    "BANK": ["ICICIBANK.NS", "HDFCBANK.NS", "SBIN.NS"],
-    "AUTO": ["TATAMOTORS.NS", "M&M.NS", "MARUTI.NS"],
-    "PHARMA": ["SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS"]
-}
-
-# ================= STATE =================
-price_history = {}
-STARTED = False
-cached_oi_bias = None
-last_oi_fetch = 0
+last_signal_time = 0
 
 # ================= TELEGRAM =================
 def send_alert(msg):
@@ -42,219 +22,175 @@ def send_alert(msg):
     except:
         pass
 
-# ================= PRICE FETCH =================
-def get_price(symbol):
+# ================= PRICE =================
+def get_price():
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        response = requests.get(url, timeout=5)
-
-        if response.status_code != 200 or not response.text.strip():
-            return None, None
-
-        data = response.json()
-        result = data.get('chart', {}).get('result')
-        if not result:
-            return None, None
-
-        meta = result[0]['meta']
-        price = meta.get('regularMarketPrice') or meta.get('chartPreviousClose')
-        prev = meta.get('previousClose')
-
-        if price is None or prev is None:
-            return None, None
-
-        change = ((price - prev) / prev) * 100
-        return price, round(change, 2)
-
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
+        res = requests.get(url, timeout=5).json()
+        meta = res['chart']['result'][0]['meta']
+        return meta.get('regularMarketPrice') or meta.get('chartPreviousClose')
     except:
-        return None, None
+        return None
 
 # ================= NSE OI =================
-def fetch_nse_oi():
+session = requests.Session()
+headers = {"User-Agent": "Mozilla/5.0"}
+
+def get_oi():
     try:
-        session = requests.Session()
-
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
         session.get("https://www.nseindia.com", headers=headers)
-
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
         res = session.get(url, headers=headers).json()
-
-        data = res.get("records", {}).get("data", [])
-
-        total_call_oi = 0
-        total_put_oi = 0
-
-        for strike in data:
-            ce = strike.get("CE")
-            pe = strike.get("PE")
-
-            if ce:
-                total_call_oi += ce.get("openInterest", 0)
-            if pe:
-                total_put_oi += pe.get("openInterest", 0)
-
-        if total_put_oi > total_call_oi:
-            return "BULLISH"
-        elif total_call_oi > total_put_oi:
-            return "BEARISH"
-
-        return "NEUTRAL"
-
-    except Exception as e:
-        print("OI Error:", e)
+        return res["records"]["data"]
+    except:
         return None
 
-# ================= LOGIC =================
-def classify(diff):
-    if diff > 0.5:
-        return "STRONG"
-    elif diff < -0.5:
-        return "WEAK"
-    return "NEUTRAL"
+# ================= GLOBAL =================
+price_history = []
+prev_strike_oi = {}
 
-def market_trend(nifty):
-    if nifty > 0.3:
-        return "BULLISH"
-    elif nifty < -0.3:
-        return "BEARISH"
-    return "SIDEWAYS"
+# ================= EXTRACT =================
+def extract_strikes(data):
+    strikes = []
 
-def momentum(name, price):
-    if name not in price_history:
-        price_history[name] = []
+    for d in data:
+        strike = d.get("strikePrice")
+        ce = d.get("CE", {})
+        pe = d.get("PE", {})
 
-    price_history[name].append(price)
+        strikes.append({
+            "strike": strike,
+            "call_oi": ce.get("openInterest", 0),
+            "put_oi": pe.get("openInterest", 0)
+        })
 
-    if len(price_history[name]) > 5:
-        price_history[name].pop(0)
+    return strikes
 
-    if len(price_history[name]) < 5:
+# ================= FIND LEVELS =================
+def find_levels(strikes):
+    max_call = max(strikes, key=lambda x: x["call_oi"])
+    max_put = max(strikes, key=lambda x: x["put_oi"])
+
+    return max_call["strike"], max_put["strike"]
+
+# ================= OI SHIFT =================
+def oi_shift(strikes):
+    global prev_strike_oi
+
+    shift_signal = []
+
+    for s in strikes:
+        strike = s["strike"]
+        call = s["call_oi"]
+        put = s["put_oi"]
+
+        prev = prev_strike_oi.get(strike, {"call": call, "put": put})
+
+        call_change = call - prev["call"]
+        put_change = put - prev["put"]
+
+        if call_change > 0:
+            shift_signal.append(("CALL_BUILD", strike))
+
+        if put_change > 0:
+            shift_signal.append(("PUT_BUILD", strike))
+
+        prev_strike_oi[strike] = {"call": call, "put": put}
+
+    return shift_signal
+
+# ================= BREAKOUT =================
+def detect_breakout(price):
+    price_history.append(price)
+
+    if len(price_history) > 15:
+        price_history.pop(0)
+
+    if len(price_history) < 6:
         return None
 
-    r = price_history[name]
+    high = max(price_history[:-1])
+    low = min(price_history[:-1])
 
-    if r[-1] > max(r[:-1]):
+    if price > high:
         return "UP"
-    elif r[-1] < min(r[:-1]):
+    elif price < low:
         return "DOWN"
 
-    return "SIDEWAYS"
+    return None
 
 # ================= MAIN =================
 def run():
-    global STARTED, cached_oi_bias, last_oi_fetch
+    global last_signal_time
 
-    if not STARTED:
-        send_alert("🧠 ELITE + OI Trading System Started")
-        STARTED = True
+    send_alert("🚀 STRIKE-LEVEL OI SYSTEM STARTED")
+
+    last_oi_time = 0
+    resistance = None
+    support = None
 
     while True:
         try:
-            data = {}
-            prices = {}
+            price = get_price()
 
-            # ===== FETCH INDEX =====
-            for name, symbol in INDEX_SYMBOLS.items():
-                price, change = get_price(symbol)
-                time.sleep(REQUEST_DELAY)
-
-                if price is not None:
-                    data[name] = change
-                    prices[name] = price
-
-            if not data or "NIFTY" not in data:
+            if not price:
                 time.sleep(10)
                 continue
 
-            nifty = data["NIFTY"]
-            trend = market_trend(nifty)
+            breakout = detect_breakout(price)
 
-            # ===== FETCH OI (cached) =====
-            if time.time() - last_oi_fetch > OI_REFRESH_INTERVAL:
-                cached_oi_bias = fetch_nse_oi()
-                last_oi_fetch = time.time()
-                print("OI Bias:", cached_oi_bias)
+            # ===== FETCH OI =====
+            if time.time() - last_oi_time > OI_REFRESH:
+                raw = get_oi()
+                if raw:
+                    strikes = extract_strikes(raw)
 
-            # ===== FIND BEST SECTOR =====
-            best_sector = None
-            best_diff = -999
+                    resistance, support = find_levels(strikes)
+                    shifts = oi_shift(strikes)
 
-            for sector in data:
-                if sector == "NIFTY":
-                    continue
+                    print("Resistance:", resistance, "Support:", support)
+                    print("OI Shifts:", shifts)
 
-                diff = data[sector] - nifty
+                    last_oi_time = time.time()
 
-                if diff > best_diff:
-                    best_diff = diff
-                    best_sector = sector
+            print(f"Price: {price} | Breakout: {breakout}")
 
-            if best_sector not in SECTOR_STOCKS:
+            now = time.time()
+            if now - last_signal_time < COOLDOWN:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # ===== SCAN STOCKS =====
-            best_stock = None
-            best_score = -999
-
-            for stock in SECTOR_STOCKS[best_sector]:
-                price, change = get_price(stock)
-                time.sleep(REQUEST_DELAY)
-
-                if price is None:
-                    continue
-
-                m = momentum(stock, price)
-
-                score = 0
-                if change > 0.5:
-                    score += 1
-                if m == "UP":
-                    score += 1
-
-                if score > best_score:
-                    best_score = score
-                    best_stock = (stock, price, change, m)
-
-            if not best_stock:
-                time.sleep(CHECK_INTERVAL)
-                continue
-
-            stock, price, change, m = best_stock
-
-            # ===== FINAL FILTER (WITH OI) =====
-            if (
-                best_diff > 0.5 and
-                m == "UP" and
-                trend != "BEARISH" and
-                cached_oi_bias != "BEARISH"
-            ):
-
-                msg = f"""
-🔥 ELITE TRADE
-
-Sector: {best_sector}
-Stock: {stock}
-Signal: BUY
-
-Market: {trend}
-OI Bias: {cached_oi_bias}
+            # ===== BUY =====
+            if breakout == "UP" and price > resistance:
+                send_alert(f"""
+🚀 BUY BREAKOUT
 
 Price: {price}
+Resistance: {resistance}
+Support: {support}
 
 Reason:
-- Sector leader
-- Momentum breakout
-- OI support
+- Resistance broken
+- Call wall cleared
+- Upside open
+""")
+                last_signal_time = now
 
-Confidence: HIGH
-"""
-                send_alert(msg)
+            # ===== SELL =====
+            elif breakout == "DOWN" and price < support:
+                send_alert(f"""
+📉 SELL BREAKDOWN
+
+Price: {price}
+Resistance: {resistance}
+Support: {support}
+
+Reason:
+- Support broken
+- Put wall failed
+- Downside open
+""")
+                last_signal_time = now
 
             time.sleep(CHECK_INTERVAL)
 
