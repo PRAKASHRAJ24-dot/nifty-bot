@@ -6,9 +6,8 @@ BOT_TOKEN = "8741088698:AAEBTaXYMVGevB7tLz4oTaCKpPXAoe9E7j4"
 CHAT_ID = "1674106249"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-CHECK_INTERVAL = 60  # seconds
+CHECK_INTERVAL = 60
 
-# ================= SYMBOLS =================
 SYMBOLS = {
     "NIFTY": "%5ENSEI",
     "BANK": "%5ENSEBANK",
@@ -18,82 +17,101 @@ SYMBOLS = {
     "AUTO": "%5ECNXAUTO"
 }
 
-# ================= STATE =================
 previous_states = {}
+price_history = {}
 
 # ================= TELEGRAM =================
 def send_alert(msg):
     try:
-        res = requests.post(
-            f"{BASE_URL}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg}
-        )
-        print("Telegram:", res.json())
+        requests.post(f"{BASE_URL}/sendMessage", json={
+            "chat_id": CHAT_ID,
+            "text": msg
+        })
     except Exception as e:
         print("Telegram Error:", e)
 
-# ================= SAFE FETCH =================
-def get_data(symbol):
+# ================= DATA =================
+def get_price(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         res = requests.get(url, timeout=5).json()
 
         result = res.get('chart', {}).get('result')
-
         if not result:
             return None
 
-        meta = result[0].get('meta', {})
+        meta = result[0]['meta']
+
         price = meta.get('regularMarketPrice')
         prev = meta.get('previousClose')
+
+        if price is None:
+            price = meta.get('chartPreviousClose')
 
         if price is None or prev is None:
             return None
 
         change = ((price - prev) / prev) * 100
-        return round(change, 2)
+        return price, round(change, 2)
 
-    except Exception as e:
-        print(f"Error fetching {symbol}:", e)
-        return None
+    except:
+        return None, None
 
 # ================= CLASSIFY =================
 def classify(diff):
     if diff > 0.5:
-        return "🚀 STRONG"
+        return "STRONG"
     elif diff < -0.5:
-        return "🔻 WEAK"
-    else:
-        return "⚖️ NEUTRAL"
+        return "WEAK"
+    return "NEUTRAL"
+
+# ================= MOMENTUM =================
+def detect_momentum(name, price):
+    if name not in price_history:
+        price_history[name] = []
+
+    price_history[name].append(price)
+
+    if len(price_history[name]) > 5:
+        price_history[name].pop(0)
+
+    if len(price_history[name]) < 5:
+        return None
+
+    recent = price_history[name]
+
+    if recent[-1] > max(recent[:-1]):
+        return "UP"
+    elif recent[-1] < min(recent[:-1]):
+        return "DOWN"
+
+    return "SIDEWAYS"
 
 # ================= MAIN =================
 def run():
-    print("🚀 Smart Sector Scanner Started")
-    send_alert("🔥 Smart Sector Scanner Started")
+    send_alert("🔥 Smart Trading Bot Started")
 
     while True:
         try:
             data = {}
+            prices = {}
 
-            # ===== Fetch Data =====
+            # ===== Fetch =====
             for name, symbol in SYMBOLS.items():
-                val = get_data(symbol)
-                if val is not None:
-                    data[name] = val
+                price, change = get_price(symbol)
 
-            print("DEBUG DATA:", data)
+                if price is not None:
+                    data[name] = change
+                    prices[name] = price
 
-            # ===== Check NIFTY =====
             if "NIFTY" not in data:
-                print("⚠️ No NIFTY data, retrying...")
                 time.sleep(10)
                 continue
 
             nifty = data["NIFTY"]
 
-            sector_scores = []
+            signals = []
 
-            # ===== Compute relative strength =====
             for sector in data:
                 if sector == "NIFTY":
                     continue
@@ -101,47 +119,41 @@ def run():
                 diff = data[sector] - nifty
                 state = classify(diff)
 
-                sector_scores.append((sector, data[sector], diff, state))
+                momentum = detect_momentum(sector, prices[sector])
 
-            # ===== Sort sectors =====
-            sector_scores.sort(key=lambda x: x[2], reverse=True)
+                # ================= SIGNAL =================
+                if state == "STRONG" and momentum == "UP":
+                    signals.append((sector, "BUY", prices[sector]))
 
-            # ===== Build snapshot =====
-            msg = f"📊 Sector Rotation (Ranked)\nNIFTY: {nifty}%\n\n"
+                elif state == "WEAK" and momentum == "DOWN":
+                    signals.append((sector, "SELL", prices[sector]))
 
-            for s in sector_scores:
-                msg += f"{s[0]}: {s[1]}% → {s[3]}\n"
+            # ===== Send signals =====
+            for s in signals:
+                sector, signal, price = s
 
-            print(msg)
+                msg = f"""
+🚀 TRADE SETUP
 
-            # ✅ Always send snapshot
-            send_alert(msg)
+Sector: {sector}
+Signal: {signal}
 
-            # ===== Detect rotation changes =====
-            alerts = []
+Price: {price}
 
-            for sector, change, diff, state in sector_scores:
-                prev = previous_states.get(sector)
+Reason:
+- Sector {('outperforming' if signal=='BUY' else 'underperforming')} NIFTY
+- Momentum confirmed
 
-                # First run
-                if prev is None:
-                    alerts.append(f"{sector}: {state} (initial)")
+Target: {round(price * 1.01, 2)}
+SL: {round(price * 0.995, 2)}
+"""
 
-                # Change detection
-                elif prev != state:
-                    alerts.append(f"{sector}: {prev} → {state}")
-
-                previous_states[sector] = state
-
-            # ===== Send change alerts =====
-            if alerts:
-                alert_msg = "🚨 Rotation Shift Detected\n\n" + "\n".join(alerts)
-                send_alert(alert_msg)
+                send_alert(msg)
 
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print("🔥 MAIN LOOP ERROR:", e)
+            print("Error:", e)
             time.sleep(10)
 
 # ================= RUN =================
